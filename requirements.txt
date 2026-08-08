@@ -1,0 +1,5 @@
+streamlit
+mido
+demucs
+basic-pitch
+setuptools<70
