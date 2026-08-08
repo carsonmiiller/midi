@@ -3,3 +3,4 @@ mido
 demucs
 basic-pitch
 setuptools<70
+numpy<2
