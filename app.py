@@ -31,15 +31,17 @@ if uploaded_file is not None:
     with open(upload_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
         
-    mid_file_path = os.path.join(output_dir, "bass_basic_pitch.mid")
+    # We now verify all three required MIDI files exist to check if a song is processed
+    bass_mid = os.path.join(output_dir, "bass_basic_pitch.mid")
+    drums_mid = os.path.join(output_dir, "drums_basic_pitch.mid")
+    other_mid = os.path.join(output_dir, "other_basic_pitch.mid")
     
-    # Check if we have both the folder AND the MIDI file
-    if not os.path.exists(output_dir) or not os.path.exists(mid_file_path):
-        # Self-heal: If folder exists but has no MIDI, wipe it to avoid Demucs errors
+    if not os.path.exists(output_dir) or not os.path.exists(bass_mid) or not os.path.exists(drums_mid) or not os.path.exists(other_mid):
+        # Self-heal: Wipe incomplete folders
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
             
-        st.info(f"Processing '{original_filename}'... This will take 1-3 minutes.")
+        st.info(f"Processing '{original_filename}'... This will take 2-4 minutes.")
         
         # Progress bar placeholder
         progress_bar = st.progress(0)
@@ -51,11 +53,11 @@ if uploaded_file is not None:
         env["TO_DISABLE_SSL_VERIFICATION"] = "1"
         env["SSL_CERT_FILE"] = ""
         
-        # Get the exact path to the virtual env's tools
+        # Get the exact path to the virtual env's tools [1]
         bin_dir = os.path.dirname(sys.executable)
         basic_pitch_path = os.path.join(bin_dir, "basic-pitch")
         
-        # Step A: Run Stem Separation (Demucs)
+        # Step A: Run Stem Separation (Demucs) [1]
         st.write("⏳ Running stem separation (Demucs)...")
         try:
             result_demucs = subprocess.run([
@@ -68,9 +70,9 @@ if uploaded_file is not None:
             if result_demucs.returncode != 0:
                 raise Exception(result_demucs.stderr)
                 
-            progress_bar.progress(50)
+            progress_bar.progress(30)
             
-            # Step B: Run Transcription on Bass (Basic Pitch)
+            # Step B: Run Transcription on Bass (Basic Pitch) [1]
             st.write("⏳ Transcribing bass line to MIDI...")
             result_bp = subprocess.run([
                 basic_pitch_path, 
@@ -80,6 +82,32 @@ if uploaded_file is not None:
             
             if result_bp.returncode != 0:
                 raise Exception(result_bp.stderr)
+            
+            progress_bar.progress(60)
+            
+            # Step C: Run Transcription on Drums (Basic Pitch) [1]
+            st.write("⏳ Transcribing drums to MIDI...")
+            result_dp = subprocess.run([
+                basic_pitch_path, 
+                output_dir, 
+                os.path.join(output_dir, "drums.wav")
+            ], env=env, capture_output=True, text=True)
+            
+            if result_dp.returncode != 0:
+                raise Exception(result_dp.stderr)
+                
+            progress_bar.progress(80)
+
+            # Step D: Run Transcription on Guitar/Other (Basic Pitch) [1]
+            st.write("⏳ Transcribing guitar (other) line to MIDI...")
+            result_op = subprocess.run([
+                basic_pitch_path, 
+                output_dir, 
+                os.path.join(output_dir, "other.wav")
+            ], env=env, capture_output=True, text=True)
+            
+            if result_op.returncode != 0:
+                raise Exception(result_op.stderr)
                 
             progress_bar.progress(100)
             st.success("Processing complete! Loading player...")
@@ -99,7 +127,7 @@ song_dir = f"./separated/htdemucs/{song_name}"
 def generate_wrapped_bass_tabs(notes_per_line=32):
     mid_path = os.path.join(song_dir, 'bass_basic_pitch.mid')
     if not os.path.exists(mid_path):
-        return "No MIDI file found. Please process a song first."
+        return "No Bass MIDI file found. Please process a song first."
         
     mid = mido.MidiFile(mid_path)
     notes = [msg.note for msg in mid if msg.type == 'note_on' and msg.velocity > 0]
@@ -117,7 +145,6 @@ def generate_wrapped_bass_tabs(notes_per_line=32):
                 break
         if not matched:
             fret_mappings.append(('E', 0))
-
     output = ""
     for i in range(0, len(fret_mappings), notes_per_line):
         chunk = fret_mappings[i : i + notes_per_line]
@@ -142,9 +169,10 @@ def generate_wrapped_bass_tabs(notes_per_line=32):
 # 3. GUITAR TAB GENERATOR (POLYPHONIC CHORD-MAPPING)
 # ----------------------------------------------------
 def generate_wrapped_guitar_tabs(notes_per_line=24):
-    mid_path = os.path.join(song_dir, 'bass_basic_pitch.mid')
+    # FIXED: Now pointing to other_basic_pitch.mid instead of bass_basic_pitch.mid!
+    mid_path = os.path.join(song_dir, 'other_basic_pitch.mid')
     if not os.path.exists(mid_path):
-        return "No MIDI file found. Please process a song first."
+        return "No Guitar MIDI file found. Please process a song first."
 
     def midi_to_guitar(midi_note):
         # e(64), B(59), G(55), D(50), A(45), E(40)
@@ -161,7 +189,6 @@ def generate_wrapped_guitar_tabs(notes_per_line=24):
     mid = mido.MidiFile(mid_path)
     current_time = 0
     note_events = []
-
     for track in mid.tracks:
         for msg in track:
             current_time += msg.time
@@ -174,7 +201,6 @@ def generate_wrapped_guitar_tabs(notes_per_line=24):
         if time not in grouped_chords:
             grouped_chords[time] = []
         grouped_chords[time].append(note)
-
     sorted_times = sorted(grouped_chords.keys())
     
     output = ""
@@ -208,11 +234,68 @@ def generate_wrapped_guitar_tabs(notes_per_line=24):
     return output
 
 # ----------------------------------------------------
-# 4. GARAGEBAND-STYLE SYNCHRONIZED PLAYER
+# 4. DRUM TAB GENERATOR (PATTERN GRID)
+# ----------------------------------------------------
+def generate_wrapped_drum_tabs(notes_per_line=32):
+    mid_path = os.path.join(song_dir, 'drums_basic_pitch.mid')
+    if not os.path.exists(mid_path):
+        return "No Drum MIDI file found. Please process a song first."
+        
+    mid = mido.MidiFile(mid_path)
+    
+    drum_mapping = {
+        'HH': [42, 44, 46],  # Hi-Hat (Closed, Pedal, Open)
+        'SD': [38, 40],      # Snare Drum
+        'BD': [35, 36]       # Bass Drum (Kick)
+    }
+    
+    current_time = 0
+    note_events = []
+    for track in mid.tracks:
+        for msg in track:
+            current_time += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                note_events.append((current_time, msg.note))
+
+    grouped_steps = {}
+    for time, note in note_events:
+        if time not in grouped_steps:
+            grouped_steps[time] = []
+        grouped_steps[time].append(note)
+    sorted_times = sorted(grouped_steps.keys())
+    
+    output = ""
+    for i in range(0, len(sorted_times), notes_per_line):
+        chunk_times = sorted_times[i : i + notes_per_line]
+        grid = { 'HH': [], 'SD': [], 'BD': [] }
+        
+        for time in chunk_times:
+            step_notes = grouped_steps[time]
+            active_elements = set()
+            
+            for note in step_notes:
+                for instrument, midi_notes in drum_mapping.items():
+                    if note in midi_notes:
+                        active_elements.add(instrument)
+            
+            for inst in grid.keys():
+                if inst in active_elements:
+                    grid[inst].append("x-")
+                else:
+                    grid[inst].append("--")
+                    
+        output += f"--- Drum Measures {i//notes_per_line + 1} ---\n"
+        for inst in ['HH', 'SD', 'BD']:
+            output += f"{inst} |-{''.join(grid[inst])}\n"
+        output += "\n"
+        
+    return output
+
+# ----------------------------------------------------
+# 5. GARAGEBAND-STYLE SYNCHRONIZED PLAYER
 # ----------------------------------------------------
 st.write("---")
 st.subheader(f"Playing: {song_name.replace('_', ' ')}")
-
 custom_player_html = """
 <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: transparent; color: white; }
@@ -228,7 +311,6 @@ custom_player_html = """
     .timeline { flex-grow: 1; accent-color: #34c759; }
     #time-display { font-family: monospace; font-size: 14px; }
 </style>
-
 <div class="mixer">
     <div class="master-controls">
         <button class="btn" id="master-play" style="background: #34c759; padding: 8px 16px;">Play</button>
@@ -237,7 +319,6 @@ custom_player_html = """
     </div>
     <div class="track-list" id="track-list"></div>
 </div>
-
 <script>
     const stems = [
         { id: "bass", name: "🎸 Bass", url: "/app/static/SONG_PLACEHOLDER/bass.wav" },
@@ -245,24 +326,20 @@ custom_player_html = """
         { id: "other", name: "🎹 Other (Guitar/Keys)", url: "/app/static/SONG_PLACEHOLDER/other.wav" },
         { id: "vocals", name: "🎤 Vocals", url: "/app/static/SONG_PLACEHOLDER/vocals.wav" }
     ];
-
     const audioElements = {};
     const tracksContainer = document.getElementById("track-list");
     let isPlaying = false;
     let masterDuration = 0;
-
     const trackStates = {
         bass: { muted: false, soloed: false },
         drums: { muted: false, soloed: false },
         other: { muted: false, soloed: false },
         vocals: { muted: false, soloed: false }
     };
-
     stems.forEach(stem => {
         const audio = new Audio(stem.url);
         audio.preload = "auto";
         audioElements[stem.id] = audio;
-
         const row = document.createElement("div");
         row.className = "track-row";
         row.innerHTML = `
@@ -274,11 +351,9 @@ custom_player_html = """
             </div>
         `;
         tracksContainer.appendChild(row);
-
         const muteBtn = document.getElementById(`mute-${stem.id}`);
         const soloBtn = document.getElementById(`solo-${stem.id}`);
         const volSlider = document.getElementById(`vol-${stem.id}`);
-
         muteBtn.onclick = () => {
             trackStates[stem.id].muted = !trackStates[stem.id].muted;
             if (!trackStates[stem.id].muted) {
@@ -288,7 +363,6 @@ custom_player_html = """
             }
             syncMixer();
         };
-
         soloBtn.onclick = () => {
             trackStates[stem.id].soloed = !trackStates[stem.id].soloed;
             if (trackStates[stem.id].soloed) {
@@ -304,31 +378,24 @@ custom_player_html = """
             }
             syncMixer();
         };
-
         volSlider.oninput = (e) => {
             audio.volume = e.target.value;
         };
     });
-
     const audios = Object.values(audioElements);
-
     function syncMixer() {
         stems.forEach(stem => {
             const id = stem.id;
             const audio = audioElements[id];
             const state = trackStates[id];
-
             audio.muted = state.muted;
-
             const mBtn = document.getElementById(`mute-${id}`);
             const sBtn = document.getElementById(`solo-${id}`);
-
             if (state.muted) {
                 mBtn.classList.add("active-mute");
             } else {
                 mBtn.classList.remove("active-mute");
             }
-
             if (state.soloed) {
                 sBtn.classList.add("active-solo");
             } else {
@@ -336,23 +403,18 @@ custom_player_html = """
             }
         });
     }
-
     syncMixer();
-
     audios[0].addEventListener("loadedmetadata", () => {
         masterDuration = Math.max(...audios.map(a => a.duration || 0));
         document.getElementById("master-timeline").max = masterDuration;
     });
-
     const playBtn = document.getElementById("master-play");
     const timeline = document.getElementById("master-timeline");
     const timeDisplay = document.getElementById("time-display");
-
     playBtn.onclick = () => {
         isPlaying = !isPlaying;
         playBtn.innerText = isPlaying ? "Pause" : "Play";
         playBtn.style.background = isPlaying ? "#ff3b30" : "#34c759";
-
         audios.forEach(audio => {
             if (isPlaying) {
                 audio.play().catch(e => console.log("Blocked: user interaction required"));
@@ -361,14 +423,12 @@ custom_player_html = """
             }
         });
     };
-
     timeline.oninput = (e) => {
         const targetTime = parseFloat(e.target.value);
         audios.forEach(audio => {
             audio.currentTime = targetTime;
         });
     };
-
     setInterval(() => {
         if (audios[0] && !audios[0].paused) {
             const currentTime = audios[0].currentTime;
@@ -384,23 +444,21 @@ custom_player_html = """
     }, 250);
 </script>
 """.replace("SONG_PLACEHOLDER", song_name)
-
 st.components.v1.html(custom_player_html, height=360)
 
 # ----------------------------------------------------
-# 5. DYNAMIC TAB VIEW WITH INSTRUMENT TOGGLE
+# 6. DYNAMIC TAB VIEW WITH INSTRUMENT TOGGLE
 # ----------------------------------------------------
 st.write("---")
 st.subheader("2. Interactive Tab Notation")
-
-# Let user toggle between Bass and Guitar tabs
 instrument_choice = st.radio(
     "Select transcription instrument notation:",
-    ("🎸 Bass Guitar (4-String)", "🎸 Guitar (6-String Polyphonic)"),
+    ("🎸 Bass Guitar (4-String)", "🎸 Guitar (6-String Polyphonic)", "🥁 Drums (Pattern Grid)"),
     horizontal=True
 )
-
 if "4-String" in instrument_choice:
     st.code(generate_wrapped_bass_tabs(), language="text")
-else:
+elif "6-String" in instrument_choice:
     st.code(generate_wrapped_guitar_tabs(), language="text")
+else:
+    st.code(generate_wrapped_drum_tabs(), language="text")
