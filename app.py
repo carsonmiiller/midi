@@ -30,26 +30,26 @@ if uploaded_file is not None:
     # Save the file locally
     with open(upload_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    
+        
     mid_file_path = os.path.join(output_dir, "bass_basic_pitch.mid")
     
     # Check if we have both the folder AND the MIDI file
     if not os.path.exists(output_dir) or not os.path.exists(mid_file_path):
-        
         # Self-heal: If folder exists but has no MIDI, wipe it to avoid Demucs errors
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
             
         st.info(f"Processing '{original_filename}'... This will take 1-3 minutes.")
+        
         # Progress bar placeholder
         progress_bar = st.progress(0)
         
-        # Ensure Homebrew and Python paths are explicitly passed to the subprocess
+        # Prepare environment variables to bypass SSL inside the subprocess
         env = os.environ.copy()
         env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
         env["PYTHONHTTPSVERIFY"] = "0"
         env["TO_DISABLE_SSL_VERIFICATION"] = "1"
-        env["SSL_CERT_FILE"] = ""  # Disable SSL verification for huggingface downloads inside Demucs
+        env["SSL_CERT_FILE"] = ""
         
         # Get the exact path to the virtual env's tools
         bin_dir = os.path.dirname(sys.executable)
@@ -65,7 +65,6 @@ if uploaded_file is not None:
                 upload_path
             ], env=env, capture_output=True, text=True)
             
-            # If Demucs failed, raise an error with its specific output
             if result_demucs.returncode != 0:
                 raise Exception(result_demucs.stderr)
                 
@@ -83,7 +82,6 @@ if uploaded_file is not None:
                 raise Exception(result_bp.stderr)
                 
             progress_bar.progress(100)
-            
             st.success("Processing complete! Loading player...")
             st.rerun()
             
@@ -96,9 +94,9 @@ if uploaded_file is not None:
 song_dir = f"./separated/htdemucs/{song_name}"
 
 # ----------------------------------------------------
-# 2. BASS TAB GENERATOR (DYNAMIC PATH)
+# 2. BASS TAB GENERATOR (MONOPHONIC)
 # ----------------------------------------------------
-def generate_wrapped_tabs(notes_per_line=32):
+def generate_wrapped_bass_tabs(notes_per_line=32):
     mid_path = os.path.join(song_dir, 'bass_basic_pitch.mid')
     if not os.path.exists(mid_path):
         return "No MIDI file found. Please process a song first."
@@ -140,14 +138,81 @@ def generate_wrapped_tabs(notes_per_line=32):
         
     return output
 
+# ----------------------------------------------------
+# 3. GUITAR TAB GENERATOR (POLYPHONIC CHORD-MAPPING)
+# ----------------------------------------------------
+def generate_wrapped_guitar_tabs(notes_per_line=24):
+    mid_path = os.path.join(song_dir, 'bass_basic_pitch.mid')
+    if not os.path.exists(mid_path):
+        return "No MIDI file found. Please process a song first."
+
+    def midi_to_guitar(midi_note):
+        # e(64), B(59), G(55), D(50), A(45), E(40)
+        strings = [('e', 64), ('B', 59), ('G', 55), ('D', 50), ('A', 45), ('E', 40)]
+        possible_positions = []
+        for string_idx, (string_name, open_midi) in enumerate(strings):
+            fret = midi_note - open_midi
+            if 0 <= fret <= 15:
+                possible_positions.append((string_idx, fret))
+        if possible_positions:
+            return min(possible_positions, key=lambda x: x[1])
+        return None
+
+    mid = mido.MidiFile(mid_path)
+    current_time = 0
+    note_events = []
+
+    for track in mid.tracks:
+        for msg in track:
+            current_time += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                note_events.append((current_time, msg.note))
+
+    # Group notes that happen at the same time (chords)
+    grouped_chords = {}
+    for time, note in note_events:
+        if time not in grouped_chords:
+            grouped_chords[time] = []
+        grouped_chords[time].append(note)
+
+    sorted_times = sorted(grouped_chords.keys())
+    
+    output = ""
+    for i in range(0, len(sorted_times), notes_per_line):
+        chunk_times = sorted_times[i : i + notes_per_line]
+        tab = {0: [], 1: [], 2: [], 3: [], 4: [], 5: []}
+        
+        for time in chunk_times:
+            chord_notes = grouped_chords[time]
+            active_strings_this_step = {}
+            
+            for note in chord_notes:
+                mapping = midi_to_guitar(note)
+                if mapping:
+                    string_idx, fret = mapping
+                    if string_idx not in active_strings_this_step:
+                        active_strings_this_step[string_idx] = fret
+            
+            for string_idx in range(6):
+                if string_idx in active_strings_this_step:
+                    tab[string_idx].append(str(active_strings_this_step[string_idx]) + "-")
+                else:
+                    tab[string_idx].append("--")
+                    
+        output += f"--- Measures {i//notes_per_line + 1} ---\n"
+        string_labels = ['e', 'B', 'G', 'D', 'A', 'E']
+        for idx, label in enumerate(string_labels):
+            output += f"{label} |-{''.join(tab[idx])}\n"
+        output += "\n"
+        
+    return output
 
 # ----------------------------------------------------
-# 3. GARAGEBAND-STYLE SYNCHRONIZED PLAYER (DYNAMIC PATH)
+# 4. GARAGEBAND-STYLE SYNCHRONIZED PLAYER
 # ----------------------------------------------------
 st.write("---")
 st.subheader(f"Playing: {song_name.replace('_', ' ')}")
 
-# We use standard Python triple quotes (no 'f') and .replace() to safely inject the song name
 custom_player_html = """
 <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: transparent; color: white; }
@@ -318,13 +383,24 @@ custom_player_html = """
         }
     }, 250);
 </script>
-""".replace("SONG_PLACEHOLDER", song_name)  # Safe Python replacement
+""".replace("SONG_PLACEHOLDER", song_name)
 
 st.components.v1.html(custom_player_html, height=360)
 
 # ----------------------------------------------------
-# 4. WRAPPED TAB NOTATION DISPLAY
+# 5. DYNAMIC TAB VIEW WITH INSTRUMENT TOGGLE
 # ----------------------------------------------------
 st.write("---")
-st.subheader("2. Bass Tab Notation (Wrapped)")
-st.code(generate_wrapped_tabs(), language="text")
+st.subheader("2. Interactive Tab Notation")
+
+# Let user toggle between Bass and Guitar tabs
+instrument_choice = st.radio(
+    "Select transcription instrument notation:",
+    ("🎸 Bass Guitar (4-String)", "🎸 Guitar (6-String Polyphonic)"),
+    horizontal=True
+)
+
+if "4-String" in instrument_choice:
+    st.code(generate_wrapped_bass_tabs(), language="text")
+else:
+    st.code(generate_wrapped_guitar_tabs(), language="text")
