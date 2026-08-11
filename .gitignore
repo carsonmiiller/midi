@@ -4,3 +4,4 @@ uploads/
 static
 separated/
 songs/
+__pycache__/
